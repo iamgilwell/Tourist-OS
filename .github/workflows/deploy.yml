@@ -87,6 +87,7 @@ jobs:
     
     - name: Get GKE credentials
       run: |
+        gcloud components install gke-gcloud-auth-plugin --quiet
         gcloud container clusters get-credentials ${{ vars.GKE_CLUSTER_NAME }} --zone=${{ vars.GKE_ZONE }}
     
     - name: Update Kubernetes secrets
