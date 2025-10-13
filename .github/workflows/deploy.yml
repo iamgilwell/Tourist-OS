@@ -90,7 +90,11 @@ jobs:
         gcloud components install gke-gcloud-auth-plugin --quiet
         gcloud container clusters get-credentials ${{ vars.GKE_CLUSTER_NAME }} --zone=${{ vars.GKE_ZONE }}
     
-    - name: Update Kubernetes secrets
+    - name: Create service account secret
+      run: |
+        kubectl create secret generic gcp-service-account-key \
+          --from-literal=key.json='${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}' \
+          --dry-run=client -o yaml | kubectl apply -f -
       run: |
         kubectl patch secret django-secret -p "{\"data\":{\"POSTGRES_DB\":\"$(echo -n ${{ vars.POSTGRES_DB }} | base64)\",\"POSTGRES_USER\":\"$(echo -n ${{ vars.POSTGRES_USER }} | base64)\",\"POSTGRES_PASSWORD\":\"$(echo -n ${{ secrets.POSTGRES_PASSWORD }} | base64)\",\"POSTGRES_HOST\":\"$(echo -n '127.0.0.1' | base64)\"}}" || echo "Secret patch failed"
         kubectl patch configmap django-config -p '{"data":{"POSTGRES_HOST":"127.0.0.1"}}' || echo "ConfigMap patch failed"
@@ -141,7 +145,17 @@ jobs:
         EOF
         
         echo "Waiting for migrations to complete..."
-        kubectl wait --for=condition=complete --timeout=10m job/django-migrate-${{ github.sha }} -n default || (kubectl describe job/django-migrate-${{ github.sha }} -n default && kubectl logs job/django-migrate-${{ github.sha }} -n default && exit 1)
+        kubectl wait --for=condition=complete --timeout=10m job/django-migrate-${{ github.sha }} -n default || (
+          echo "Migration job failed. Getting details..."
+          kubectl describe job/django-migrate-${{ github.sha }} -n default
+          echo "Pod details:"
+          kubectl describe pods -l job-name=django-migrate-${{ github.sha }} -n default
+          echo "Django container logs:"
+          kubectl logs -l job-name=django-migrate-${{ github.sha }} -c django-migrate -n default --tail=50
+          echo "Cloud SQL Proxy logs:"
+          kubectl logs -l job-name=django-migrate-${{ github.sha }} -c cloud-sql-proxy -n default --tail=50
+          exit 1
+        )
     
     - name: Deploy to GKE
       run: |
