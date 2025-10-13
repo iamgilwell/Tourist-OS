@@ -1,0 +1,39 @@
+# Secret files - DO NOT COMMIT
+k8s/overlays/*/secrets.env
+*.env
+.env*
+
+# Development environment files with sensitive data
+k8s/dev/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+
+# Django
+*.log
+local_settings.py
+db.sqlite3
+media/
+
+# IDE
+.vscode/
+.idea/
+
+# Pre-commit
+.pre-commit-cache/
+k8s/dev/*
+# Environment files with real secrets
+.env
+k8s/overlays/*/secrets.env
+k8s/dev/postgres/secret.yaml
+
+# Keep example files
+!.env.example
+!k8s/overlays/*/secrets.env.example
