@@ -1,0 +1,144 @@
+name: Deploy to GKE
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  IMAGE_NAME: ${{ vars.DOCKER_REGISTRY }}/${{ vars.GCP_PROJECT_ID }}/optimus-prime/django-app
+  CLOUD_SQL_INSTANCE: ${{ vars.GCP_PROJECT_ID }}:${{ vars.GCP_REGION }}:${{ vars.CLOUD_SQL_INSTANCE_NAME }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: ${{ vars.POSTGRES_DB }}
+          POSTGRES_USER: ${{ vars.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        sudo apt-get update && sudo apt-get install -y gcc python3-dev libpq-dev
+        pip install --upgrade pip
+        pip install -r requirements.txt
+    
+    - name: Run tests
+      env:
+        POSTGRES_DB: ${{ vars.POSTGRES_DB }}
+        POSTGRES_USER: ${{ vars.POSTGRES_USER }}
+        POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+        POSTGRES_HOST: localhost
+        POSTGRES_PORT: 5432
+        SECRET_KEY: ${{ secrets.CI_SECRET_KEY }}
+        DEBUG: "True"
+      run: |
+        python manage.py makemigrations --check --dry-run
+        python manage.py migrate
+        python manage.py test
+
+  build-and-deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Cloud SDK
+      uses: google-github-actions/setup-gcloud@v1
+      with:
+        service_account_key: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+        project_id: ${{ vars.GCP_PROJECT_ID }}
+    
+    - name: Configure Docker
+      run: gcloud auth configure-docker ${{ vars.DOCKER_REGISTRY }}
+    
+    - name: Build and push Docker image
+      run: |
+        docker build -t ${{ env.IMAGE_NAME }}:${{ github.sha }} .
+        docker push ${{ env.IMAGE_NAME }}:${{ github.sha }}
+        docker tag ${{ env.IMAGE_NAME }}:${{ github.sha }} ${{ env.IMAGE_NAME }}:latest
+        docker push ${{ env.IMAGE_NAME }}:latest
+    
+    - name: Get GKE credentials
+      run: |
+        gcloud container clusters get-credentials ${{ vars.GKE_CLUSTER_NAME }} --zone=${{ vars.GKE_ZONE }}
+    
+    - name: Update Kubernetes secrets
+      run: |
+        kubectl patch secret django-secret -p "{\"data\":{\"POSTGRES_DB\":\"$(echo -n ${{ vars.POSTGRES_DB }} | base64)\",\"POSTGRES_USER\":\"$(echo -n ${{ vars.POSTGRES_USER }} | base64)\",\"POSTGRES_PASSWORD\":\"$(echo -n ${{ secrets.POSTGRES_PASSWORD }} | base64)\",\"POSTGRES_HOST\":\"$(echo -n '127.0.0.1' | base64)\"}}" || echo "Secret patch failed"
+        kubectl patch configmap django-config -p '{"data":{"POSTGRES_HOST":"127.0.0.1"}}' || echo "ConfigMap patch failed"
+    
+    - name: Run database migrations
+      run: |
+        cat <<EOF | kubectl apply -f -
+        apiVersion: batch/v1
+        kind: Job
+        metadata:
+          name: django-migrate-${{ github.sha }}
+        spec:
+          template:
+            spec:
+              containers:
+              - name: django-migrate
+                image: ${{ env.IMAGE_NAME }}:${{ github.sha }}
+                command: ["python", "manage.py", "migrate", "--noinput"]
+                resources:
+                  requests:
+                    memory: "64Mi"
+                    cpu: "50m"
+                  limits:
+                    memory: "128Mi"
+                    cpu: "100m"
+                envFrom:
+                - configMapRef:
+                    name: django-config
+                - secretRef:
+                    name: django-secret
+              - name: cloud-sql-proxy
+                image: gcr.io/cloudsql-docker/gce-proxy:1.33.2
+                args:
+                  - "/cloud_sql_proxy"
+                  - "-instances=${{ env.CLOUD_SQL_INSTANCE }}=tcp:5432"
+                securityContext:
+                  runAsNonRoot: true
+                resources:
+                  requests:
+                    memory: "64Mi"
+                    cpu: "50m"
+                  limits:
+                    memory: "128Mi"
+                    cpu: "100m"
+              restartPolicy: Never
+          backoffLimit: 3
+          ttlSecondsAfterFinished: 600
+        EOF
+        
+        echo "Waiting for migrations to complete..."
+        kubectl wait --for=condition=complete --timeout=10m job/django-migrate-${{ github.sha }} -n default || (kubectl describe job/django-migrate-${{ github.sha }} -n default && kubectl logs job/django-migrate-${{ github.sha }} -n default && exit 1)
+    
+    - name: Deploy to GKE
+      run: |
+        # Update deployment image
+        kubectl set image deployment/django-deployment django=${{ env.IMAGE_NAME }}:${{ github.sha }}
+        kubectl rollout status deployment/django-deployment
