@@ -111,11 +111,11 @@ jobs:
                 command: ["python", "manage.py", "migrate", "--noinput"]
                 resources:
                   requests:
+                    memory: "32Mi"
+                    cpu: "25m"
+                  limits:
                     memory: "64Mi"
                     cpu: "50m"
-                  limits:
-                    memory: "128Mi"
-                    cpu: "100m"
                 envFrom:
                 - configMapRef:
                     name: django-config
@@ -130,11 +130,11 @@ jobs:
                   runAsNonRoot: true
                 resources:
                   requests:
-                    memory: "64Mi"
-                    cpu: "50m"
+                    memory: "16Mi"
+                    cpu: "25m"
                   limits:
-                    memory: "128Mi"
-                    cpu: "100m"
+                    memory: "32Mi"
+                    cpu: "50m"
               restartPolicy: Never
           backoffLimit: 3
           ttlSecondsAfterFinished: 600
