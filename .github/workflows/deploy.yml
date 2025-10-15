@@ -164,17 +164,29 @@ jobs:
         EOF
         
         echo "Waiting for migrations to complete..."
-        kubectl wait --for=condition=complete --timeout=10m job/django-migrate-${{ github.sha }} -n default || (
-          echo "Migration job failed. Getting details..."
-          kubectl describe job/django-migrate-${{ github.sha }} -n default
-          echo "Pod details:"
-          kubectl describe pods -l job-name=django-migrate-${{ github.sha }} -n default
-          echo "Django container logs:"
-          kubectl logs -l job-name=django-migrate-${{ github.sha }} -c django-migrate -n default --tail=50
-          echo "Cloud SQL Proxy logs:"
-          kubectl logs -l job-name=django-migrate-${{ github.sha }} -c cloud-sql-proxy -n default --tail=50
-          exit 1
-        )
+        # Wait for the django-migrate container to complete (not the whole job, since proxy sidecar keeps running)
+        for i in {1..60}; do
+          POD_NAME=$(kubectl get pods -l job-name=django-migrate-${{ github.sha }} -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+          if [ -n "$POD_NAME" ]; then
+            CONTAINER_STATE=$(kubectl get pod $POD_NAME -o jsonpath='{.status.containerStatuses[?(@.name=="django-migrate")].state.terminated.reason}' 2>/dev/null || echo "")
+            EXIT_CODE=$(kubectl get pod $POD_NAME -o jsonpath='{.status.containerStatuses[?(@.name=="django-migrate")].state.terminated.exitCode}' 2>/dev/null || echo "")
+
+            if [ "$CONTAINER_STATE" = "Completed" ] && [ "$EXIT_CODE" = "0" ]; then
+              echo "✅ Migration completed successfully!"
+              kubectl logs -l job-name=django-migrate-${{ github.sha }} -c django-migrate -n default --tail=30
+              break
+            elif [ "$CONTAINER_STATE" = "Error" ] || [ -n "$EXIT_CODE" ] && [ "$EXIT_CODE" != "0" ]; then
+              echo "❌ Migration failed with exit code $EXIT_CODE"
+              kubectl describe job/django-migrate-${{ github.sha }} -n default
+              kubectl describe pod $POD_NAME -n default
+              kubectl logs $POD_NAME -c django-migrate -n default --tail=50
+              kubectl logs $POD_NAME -c cloud-sql-proxy -n default --tail=50
+              exit 1
+            fi
+          fi
+          echo "⏳ Waiting for migration... ($i/60)"
+          sleep 10
+        done
     
     - name: Deploy to GKE
       run: |
